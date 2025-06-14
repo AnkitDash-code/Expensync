@@ -1,4 +1,3 @@
-import FilesUpload from "./FilesUpload";
 import Graph from "./Graph";
 import NavBar from "./NavBar";
 import OverView from "./OverView";
@@ -6,13 +5,13 @@ import VendorExpense from "./VendorExpense";
 
 const User = () => {
   return (
-    <div className="h-auto bg-[#161616] ">
+    <div className="h-auto flex flex-col justify-center items-center bg-[#161616] ">
       <NavBar />
-      <div className="border border-gray-50 rounded-2xl py-4 px-10 m-4 flex flex-col justify-center items-center shadow-neumorphic scale-90">
+      <h1 className="font-impact text-5xl text-white p-6 mt-6">Dashboard</h1>
+      <div className="border border-gray-50 rounded-2xl p-6 mb-6 flex flex-col justify-center items-center shadow-neumorphic scale-100">
         <OverView />
         <Graph />
         <VendorExpense />
-        <FilesUpload />
       </div>
     </div>
   );

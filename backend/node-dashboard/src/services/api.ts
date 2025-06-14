@@ -92,6 +92,10 @@ class ApiService {
     return response.data;
   }
 
+  async updateUser(id: string, userData: any) {
+    return this.updateRecord('users', id, userData);
+  }
+
   // Expenses endpoints
   async getExpenses() {
     const response = await this.client.get('/api/expenses');
@@ -198,9 +202,93 @@ class ApiService {
   }
 
   async createFiles(fileData: any) {
-    const response = await this.client.post('/api/files', fileData);
+    const response = await this.client.post('/api/files/upload', fileData);
     return response.data;
+  }
+
+  async deleteBucket(bucketName: string) {
+    const response = await this.client.delete(`/api/files/bucket/${bucketName}`);
+    return response.data;
+  }
+
+  async uploadFileToBucket(file: File, bucketName: string) {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('bucket', bucketName);
+
+    const response = await this.client.post('/api/files', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+    return response.data;
+  }
+
+  async createBucket(bucketName: string) {
+    const response = await this.client.post('/api/files/bucket', { bucketName });
+    return response.data;
+  }
+
+  // New Dashboard APIs
+  async getUserDashboardSummary() {
+    const response = await this.client.get('/api/dashboard/user-summary');
+    return response.data;
+  }
+
+  async getAdminDashboardSummary() {
+    const response = await this.client.get('/api/dashboard/admin-summary');
+    return response.data;
+  }
+
+  // New Expense Management APIs
+  async approveExpense(id: string) {
+    const response = await this.client.post(`/api/expenses/${id}/approve`);
+    return response.data;
+  }
+
+  async rejectExpense(id: string) {
+    const response = await this.client.post(`/api/expenses/${id}/reject`);
+    return response.data;
+  }
+
+  async flagExpense(id: string) {
+    const response = await this.client.post(`/api/expenses/${id}/flag`);
+    return response.data;
+  }
+
+  // AI Service Token Generation
+  async generateAiServiceToken() {
+    const response = await this.client.post('/auth/service-token', {});
+    return response.data;
+  }
+
+  // New Reports APIs
+  async getUserReports() {
+    const response = await this.client.get('/api/reports/user');
+    return response.data.expenses;
+  }
+
+  async getAdminReports() {
+    const response = await this.client.get('/api/reports/admin');
+    return response.data.expenses;
+  }
+
+  // New Project Teams APIs
+  async getProjectMembers(tripId: string) {
+    const response = await this.client.get(`/api/trips/${tripId}/members`);
+    return response.data.members;
+  }
+
+  async getTeamMemberExpenses(tripId: string, userId: string) {
+    const response = await this.client.get(`/api/trips/${tripId}/members/${userId}/expenses`);
+    return response.data.expenses;
+  }
+
+  // Vendor Management - status update (can use generic updateRecord for profiles)
+  async updateVendorStatus(vendorProfileId: string, status: string) {
+    return this.updateRecord('profiles', vendorProfileId, { status });
   }
 }
 
-export const api = new ApiService();
+const api = new ApiService();
+export default api;
