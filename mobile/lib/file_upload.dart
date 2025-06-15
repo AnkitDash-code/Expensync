@@ -1,16 +1,24 @@
 import 'package:flutter/material.dart';
 import 'package:file_selector/file_selector.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:fl_chart/fl_chart.dart';
 import 'dart:io';
-import 'dart:math';
 import 'package:it_team_app/api_service.dart';
+import 'package:it_team_app/auth_service.dart';
+import 'package:it_team_app/ocr_service.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:it_team_app/camera_guide_screen.dart';
 
 class FileUploadPage extends StatefulWidget {
   const FileUploadPage({super.key});
 
   @override
   State<FileUploadPage> createState() => _FileUploadPageState();
+}
+
+class FileUploadError extends Error {
+  final String message;
+  FileUploadError(this.message);
+  @override
+  String toString() => message;
 }
 
 late AnimationController _arrowController;
@@ -24,43 +32,18 @@ class _FileUploadPageState extends State<FileUploadPage>
   List<Map<String, dynamic>> _trips = [];
   String? _selectedTripId;
   bool _isLoadingTrips = true;
-  bool _isUploading = false;
   String? _uploadMessage;
   String? _uploadedFileUrl;
   String? _tripsErrorMessage;
+  String? _ocrError;
+  bool _fileUploaded = false;
 
-  
-
-  final SupabaseClient _supabaseClient = Supabase.instance.client;
   final ApiService _apiService = ApiService();
-
-  late AnimationController _animationController;
-  late Animation<double> _fadeInAnimation;
-
-  final PageController _pageController = PageController(viewportFraction: 0.5);
-  double _currentPage = 0;
-
   @override
   void initState() {
     super.initState();
     _fetchTrips();
 
-    _animationController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 600),
-    );
-
-    _fadeInAnimation = Tween<double>(begin: 0, end: 1).animate(
-      CurvedAnimation(parent: _animationController, curve: Curves.easeIn),
-    );
-
-    _animationController.forward();
-
-    _pageController.addListener(() {
-      setState(() {
-        _currentPage = _pageController.page!;
-      });
-    });
     _arrowController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1000),
@@ -81,16 +64,30 @@ class _FileUploadPageState extends State<FileUploadPage>
       _tripsErrorMessage = null;
     });
     try {
-      final List<Map<String, dynamic>>? trips = await _supabaseClient
-          .from('trips')
-          .select('*') as List<Map<String, dynamic>>?;
-
+      final authService = AuthService();
+      final email = await authService.getCurrentUserEmail();
+      if (email == null) {
+        setState(() {
+          _tripsErrorMessage = 'No user email found. Please log in again.';
+          _trips = [];
+        });
+        return;
+      }
+      final userId = await _apiService.getUserIdByEmail(email);
+      if (userId == null) {
+        setState(() {
+          _tripsErrorMessage = 'User ID not found for email.';
+          _trips = [];
+        });
+        return;
+      }
+      final trips = await _apiService.getTripsByUser(userId);
       setState(() {
-        _trips = trips ?? [];
+        _trips = trips;
       });
     } catch (e) {
       setState(() {
-        _tripsErrorMessage = 'Failed to load trips: \${e.toString()}';
+        _tripsErrorMessage = 'Failed to load trips: [${e.toString()}';
         _trips = [];
       });
     } finally {
@@ -100,7 +97,83 @@ class _FileUploadPageState extends State<FileUploadPage>
     }
   }
 
+  Future<void> _processUploadedFile(XFile file) async {
+    if (_fileUploaded) return;
+
+    setState(() {
+      fileName = file.name;
+      _uploadMessage = 'Processing...';
+      _ocrError = null;
+      _uploadedFileUrl = null;
+    });
+
+    try {
+      final uploadedUrl = await _apiService.uploadFile(File(file.path));
+      
+      if (uploadedUrl != null) {
+        setState(() {
+          _uploadedFileUrl = uploadedUrl;
+          _uploadMessage = 'Processing receipt...';
+        });
+
+        final authService = AuthService();
+        final email = await authService.getCurrentUserEmail();
+        if (email != null) {
+          final userId = await _apiService.getUserIdByEmail(email);
+          if (userId != null) {
+            try {
+              await OcrService().callOcrApi(
+                fileUrl: uploadedUrl,
+                userId: userId,
+                tripId: _selectedTripId!,
+              );
+
+              setState(() {
+                _uploadMessage = 'Receipt processed successfully!';
+                _ocrError = null;
+                _fileUploaded = true;
+              });
+
+              // Wait a moment to show the success message, then pop back
+              await Future.delayed(const Duration(seconds: 2));
+              if (mounted) {
+                Navigator.of(context).pop(); // Go back to dashboard
+              }
+            } catch (e) {
+              setState(() {
+                _ocrError = e.toString();
+                _uploadMessage = 'Upload successful, but OCR processing failed';
+                _fileUploaded = false;
+              });
+            }
+          } else {
+            throw FileUploadError('Could not find user ID');
+          }
+        } else {
+          throw FileUploadError('No user email found. Please log in again.');
+        }
+      } else {
+        setState(() {
+          _uploadMessage = 'Upload failed';
+          _fileUploaded = false;
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _uploadMessage = 'Upload failed: ${e.toString()}';
+        _fileUploaded = false;
+      });
+    }
+  }
+
   Future<void> pickAndUploadFile() async {
+    if (_fileUploaded) {
+      setState(() {
+        _uploadMessage = 'A file has already been uploaded. Please wait.';
+      });
+      return;
+    }
+
     if (_selectedTripId == null) {
       setState(() {
         _uploadMessage = 'Please select a trip first.';
@@ -108,109 +181,63 @@ class _FileUploadPageState extends State<FileUploadPage>
       return;
     }
 
-    final typeGroup = XTypeGroup(
-      label: 'images',
-      extensions: ['jpg', 'jpeg', 'png', 'gif'],
+    final option = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.camera_alt, color: Colors.white),
+              title: const Text('Take a Picture',
+                  style: TextStyle(color: Colors.white)),
+              onTap: () => Navigator.pop(context, 'camera'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library, color: Colors.white),
+              title: const Text('Choose from Gallery',
+                  style: TextStyle(color: Colors.white)),
+              onTap: () => Navigator.pop(context, 'gallery'),
+            ),
+          ],
+        ),
+      ),
     );
 
-    final XFile? file = await openFile(acceptedTypeGroups: [typeGroup]);
+    if (option == null) return;
 
+    XFile? file;
+    if (option == 'camera') {
+      // Use the camera guide screen for guided photo capture
+      file = await Navigator.push<XFile>(
+        context,
+        MaterialPageRoute(builder: (context) => const CameraGuideScreen()),
+      );
+    } else {
+      final typeGroup = XTypeGroup(
+        label: 'images',
+        extensions: ['jpg', 'jpeg', 'png', 'gif'],
+      );
+      final result = await openFile(acceptedTypeGroups: [typeGroup]);
+      if (result != null) {
+        file = XFile(result.path);
+      }
+    }
+    
     if (file == null) return;
 
-    final fileSizeLimit = 5 * 1024 * 1024;
+    final fileSizeLimit = 5 * 1024 * 1024; // 5MB
     if (await file.length() > fileSizeLimit) {
       setState(() {
-        _uploadMessage = 'File size exceeds limit (\$fileSizeLimit bytes).';
+        _uploadMessage = 'File size exceeds 5MB limit';
         fileName = null;
       });
       return;
     }
 
-    setState(() {
-      fileName = file.name;
-      _uploadMessage = null;
-      _uploadedFileUrl = null;
-      _isUploading = true;
-    });
-
-    final userId = _supabaseClient.auth.currentUser?.id;
-    if (userId == null) {
-      setState(() {
-        _uploadMessage = 'Error: User not logged in.';
-        _isUploading = false;
-      });
-      return;
-    }
-
-    final filePath = '\$userId/\${_selectedTripId!}/\$fileName';
-    const bucketName = 'images';
-
-    final String? uploadedUrl =
-        await uploadFile(File(file.path), bucketName, filePath);
-
-    setState(() {
-      _isUploading = false;
-      if (uploadedUrl != null) {
-        _uploadedFileUrl = uploadedUrl;
-        _uploadMessage = 'Upload successful!';
-
-        String? modifiedFileUrl = _uploadedFileUrl;
-        if (modifiedFileUrl != null) {
-          modifiedFileUrl =
-              modifiedFileUrl.replaceFirst('/public/images/', '/public/');
-        }
-
-        if (modifiedFileUrl != null && _selectedTripId != null) {
-          _apiService.callOcrApi(
-            fileUrl: modifiedFileUrl,
-            userId: userId,
-            tripId: _selectedTripId!,
-          );
-        }
-      } else {
-        _uploadMessage = 'Upload failed.';
-      }
-    });
+    await _processUploadedFile(file);
   }
-
-  Future<String?> uploadFile(
-      File file, String bucketName, String filePath) async {
-    try {
-      final String uploadedFilePath = await _supabaseClient.storage
-          .from(bucketName)
-          .upload(filePath, file,
-              fileOptions: const FileOptions(cacheControl: '3600'));
-
-      final String publicUrl =
-          _supabaseClient.storage.from(bucketName).getPublicUrl(uploadedFilePath);
-
-      return publicUrl;
-    } catch (e) {
-      return null;
-    }
-  }
-
-  void _handleCarouselTap(TapUpDetails details) {
-    final box = context.findRenderObject() as RenderBox;
-    final localOffset = box.globalToLocal(details.globalPosition);
-    final dx = localOffset.dx;
-    final screenWidth = MediaQuery.of(context).size.width;
-
-    if (dx < screenWidth / 2) {
-      _pageController.previousPage(duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
-    } else {
-      _pageController.nextPage(duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
-    }
-  }
-
-  @override
-  void dispose() {
-    _animationController.dispose();
-    _pageController.dispose();
-    _arrowController.dispose();
-    super.dispose();
-  }
-
   @override
   Widget build(BuildContext context) {
     final darkBackground = const Color(0xFF121212);
@@ -219,7 +246,7 @@ class _FileUploadPageState extends State<FileUploadPage>
     return Scaffold(
       backgroundColor: darkBackground,
       appBar: AppBar(
-        title: const Text('Dashboard'),
+        title: const Text('File Upload'),
         backgroundColor: Colors.black,
         elevation: 4,
         foregroundColor: Colors.white,
@@ -229,46 +256,6 @@ class _FileUploadPageState extends State<FileUploadPage>
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             const SizedBox(height: 30),
-            GestureDetector(
-              onTapUp: _handleCarouselTap,
-              child: SizedBox(
-                height: 200,
-                child: PageView.builder(
-                  controller: _pageController,
-                  itemCount: 4,
-                  itemBuilder: (context, index) {
-                    double offset = (_currentPage - index);
-                    double scale = max(0.9, 1 - offset.abs() * 0.3);
-                    double opacity = max(0.5, 1 - offset.abs() * 0.5);
-                    double translate = offset * -20;
-
-                    return Transform.translate(
-                      offset: Offset(translate, 0),
-                      child: Transform.scale(
-                        scale: scale,
-                        child: Opacity(
-                          opacity: opacity,
-                          child: Container(
-                            margin: const EdgeInsets.symmetric(horizontal: 12),
-                            width: 180,
-                            height: 180,
-                            decoration: BoxDecoration(
-                              color: placeholderColor,
-                              borderRadius: BorderRadius.circular(16),
-                              border: Border.all(color: Colors.white, width: 2),
-                            ),
-                            child: const Center(
-                              child: Icon(Icons.image, size: 48, color: Colors.white70),
-                            ),
-                          ),
-                        ),
-                      ),
-                    );
-                  },
-                ),
-              ),
-            ),
-            const SizedBox(height: 40),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 24),
               child: Container(
@@ -280,13 +267,20 @@ class _FileUploadPageState extends State<FileUploadPage>
                 padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 30),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (_isLoadingTrips)
+                  children: [                    if (_isLoadingTrips)
                       const Center(child: CircularProgressIndicator())
                     else if (_tripsErrorMessage != null)
                       Center(
                         child: Text(
                           _tripsErrorMessage!,
+                          style: const TextStyle(color: Colors.redAccent),
+                          textAlign: TextAlign.center,
+                        ),
+                      )
+                    else if (_ocrError != null)
+                      Center(
+                        child: Text(
+                          _ocrError!,
                           style: const TextStyle(color: Colors.redAccent),
                           textAlign: TextAlign.center,
                         ),
@@ -315,12 +309,13 @@ class _FileUploadPageState extends State<FileUploadPage>
                             fileName = null;
                             _uploadMessage = null;
                             _uploadedFileUrl = null;
+                            _fileUploaded = false;
                           });
                         },
                       ),
                       const SizedBox(height: 24),
                       if (fileName != null)
-                        Text('Selected file: \$fileName',
+                        Text('Selected file: $fileName',
                             style: const TextStyle(color: Colors.white)),
                       if (_uploadMessage != null)
                         Padding(
@@ -353,9 +348,8 @@ class _FileUploadPageState extends State<FileUploadPage>
                   ],
                 ),
               ),
-              
             ),
-            const SizedBox(height: 240),
+            const SizedBox(height: 480),
             GestureDetector(
               onVerticalDragStart: (details) {
                 _dragStartOffset = details.globalPosition;
@@ -376,11 +370,14 @@ class _FileUploadPageState extends State<FileUploadPage>
                 children: [
                   SlideTransition(
                     position: _arrowAnimation,
-                    child: Icon(Icons.keyboard_arrow_up, size: 48, color: Colors.white),
+                    child: const Icon(Icons.keyboard_arrow_up, size: 48, color: Colors.white),
                   ),
-                  const Text(
-                    'Swipe up to upload',
-                    style: TextStyle(color: Colors.white70, fontSize: 16),
+                  Text(
+                    _fileUploaded ? 'File uploaded' : 'Swipe up to upload',
+                    style: TextStyle(
+                      color: _fileUploaded ? Colors.white38 : Colors.white70,
+                      fontSize: 16,
+                    ),
                   ),
                   const SizedBox(height: 24),
                 ],
